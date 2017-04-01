@@ -1,0 +1,141 @@
+#!/usr/bin/env python
+
+import os
+import time
+import signal
+import sqlite3
+from slackclient import SlackClient
+
+channels = {}
+users = {}
+slack = {}
+db = {}
+running = True
+
+def signal_handler(signal, frame):
+	running = False
+	print " Ctrl+C entered"
+	db.close()
+	exit()
+
+def respond(message, channel, user):
+	slack.api_call(
+		"chat.postMessage",
+		channel = channel,
+		text = "@" + users[user]["name"] + ": " + message,
+		as_user = True,
+		link_names = True
+	)
+
+def handle_command(message):
+	user = message["user"]
+	channel = message["channel"]
+	cursor = db.cursor()
+	text = message["text"]
+	query = "update users set disabled = :disabled where id = :userid"
+
+	if "disable" in text:
+		disabled = 1
+		respond("Disabled", channel, user)		
+	elif "enable" in text:
+		disabled = 0
+		respond("Enabled", channel, user)
+	else:
+		respond("pls", channel, user)
+
+	cursor.execute(query, { "disabled": disabled, "userid": user })
+	users[user]["disabled"] = disabled
+	db.commit()
+
+def handle_message(message):
+	if "ts" in message and "user" in message and "channel" in message:
+		ts = message["ts"]
+		channel = channels[message["channel"]]
+		name = users[message["user"]]["name"]
+		text = message["text"]
+
+		if name == "archiver":
+			return
+
+		if text.startswith("!archiver"):
+			handle_command(message, db)
+			return
+
+		if not users[message["user"]]["disabled"] == 0:
+			return
+
+		query = "insert or ignore into messages (ts, userid, channelid, message) values (:ts, :userid, :channelid, :message)"
+		cursor = db.cursor()
+		cursor.execute(query, { "ts": ts, "userid": message["user"], "channelid": message["channel"], "message": text })
+		db.commit();
+
+if __name__ == "__main__":
+	signal.signal(signal.SIGINT, signal_handler)
+
+	if not os.path.exists("chat.db"):
+		db = sqlite3.connect("chat.db")
+		
+		with open("db.sql") as sql:
+			for line in sql.readlines():
+				db.execute(line)
+	else:
+		db = sqlite3.connect("chat.db")
+
+	cursor = db.cursor()
+
+	cursor.execute("select * from channels")
+
+	for row in cursor.fetchall():
+		channelid, name = row
+		channels[channelid] = name
+
+	cursor.execute("select * from users")
+	
+	for row in cursor.fetchall():
+		userid, name, disabled = row
+		users[userid] = { "name": name, "disabled": disabled }
+
+	f = open("conf", "r")
+	token = f.readline()
+	f.close()
+
+	slack = SlackClient(token)
+
+	for channel in slack.api_call("channels.list")["channels"]:
+		if channel and "name" in channel and "id" in channel:
+			if not channels.get(channel["id"], 0):
+				channelid = channel["id"]
+				name = channel["name"]
+
+				print "Channel: " + channelid + " " + name
+				channels[channelid] = name
+
+				query = "insert into channels (id, name) values(:channelid, :name)"
+				cursor.execute(query, { "channelid": channelid, "name": name })
+
+	for user in slack.api_call("users.list")["members"]:
+		if user and "name" in user and "id" in user:
+			if not users.get(user["id"]):
+				userid = user["id"]
+				name = user["name"]
+
+				print "User: " + userid + " " + name
+				users[user["id"]] = { "name": name, "disabled": 0 }
+
+				query = "insert into users (id, name, disabled) values (:userid, :name, :disabled)"
+				cursor.execute(query, { "userid": userid, "name": name, "disabled": 0 })
+
+	db.commit()
+
+	if slack.rtm_connect():
+		while running:
+			data = slack.rtm_read()
+			
+			for item in data:
+				if item and "type" in item and "message" in item["type"] and "text" in item:
+					handle_message(item)
+					time.sleep(1)
+	else:
+		print "Failed to connect"
+
+	db.close()
