@@ -58,7 +58,7 @@ def handle_message(message):
 			return
 
 		if text.startswith("!archiver"):
-			handle_command(message, db)
+			handle_command(message)
 			return
 
 		if not users[message["user"]]["disabled"] == 0:
