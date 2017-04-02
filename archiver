@@ -42,6 +42,7 @@ def handle_command(message):
 		respond("Enabled", channel, user)
 	else:
 		respond("pls", channel, user)
+		return
 
 	cursor.execute(query, { "disabled": disabled, "userid": user })
 	users[user]["disabled"] = disabled
